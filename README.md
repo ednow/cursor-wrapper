@@ -110,6 +110,107 @@ agent -p "<prompt>" --output-format stream-json --stream-partial-output
 pytest
 ```
 
+## 配置到openclaw中
+
+```json
+  "models": {
+    "providers": {
+      "cursorcli": {
+        "baseUrl": "http://127.0.0.1:8000/v1",
+        "apiKey": "__OPENCLAW_REDACTED__",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "cursor-agent",
+            "name": "Cursor Agent (Auto)",
+            "api": "openai-completions",
+            "reasoning": false,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 200000,
+            "maxTokens": 8192
+          },
+          {
+            "id": "claude-opus-4.6",
+            "name": "Claude 4.6 Opus",
+            "api": "openai-completions",
+            "reasoning": false,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 200000,
+            "maxTokens": 8192
+          },
+          {
+            "id": "claude-sonnet-4.6",
+            "name": "Claude 4.6 Sonnet",
+            "api": "openai-completions",
+            "reasoning": false,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 200000,
+            "maxTokens": 8192
+          },
+          {
+            "id": "gpt-5.4",
+            "name": "GPT-5.4",
+            "api": "openai-completions",
+            "reasoning": false,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 200000,
+            "maxTokens": 8192
+          },
+          {
+            "id": "gemini-3.1-pro",
+            "name": "Gemini 3.1 Pro",
+            "api": "openai-completions",
+            "reasoning": false,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 200000,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  }
+```
+
 ## 已知限制
 
 - 当前仅兼容 `chat.completions`
