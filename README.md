@@ -11,8 +11,8 @@
 
 ## 前置条件
 
-1. 本机已安装 `Cursor Agent CLI`
-2. 本机已完成 `agent login`
+1. 本机已安装 `Cursor Agent CLI`（[安装 Cursor Agent CLI（若尚未有 agent 命令）](#安装-cursor-agent-cli若尚未有-agent-命令)）
+2. 本机已完成 `agent login`（或使用 `CURSOR_API_KEY`，[Cursor API Key（可选）](#cursor-api-key可选)）
 3. Python 3.10+
 
 ## 安装依赖
@@ -44,61 +44,36 @@ cp app/config.bak.py app/config.py
 - `CURSOR_BIN`：Cursor CLI 可执行文件，默认 `agent`
 - `CURSOR_WORKSPACE`：CLI 执行时使用的工作区目录，默认当前目录
 - `WRAPPER_API_KEY`：包装层 Bearer Token，可选；设置后会校验 `Authorization` 请求头
-- `CURSOR_API_KEY`：Cursor 官方 API Key，可选；设置后会注入到 `cursor-agent` 子进程环境变量，
-  用于在没有执行过 `agent login` 的环境（如服务器、CI）下完成 Cursor 后端鉴权
+- `CURSOR_API_KEY`：Cursor 官方 API Key，可选；设置后会注入到 `cursor-agent` 子进程环境变量，用于在没有执行过 `agent login` 的环境（如服务器、CI）下完成 Cursor 后端鉴权
 - `DEFAULT_MODEL`：默认对外模型名，默认 `cursor-agent`
 - `MODEL_ALIASES`：模型别名映射，格式如 `gpt-4o=claude-4-sonnet,gpt-4.1=gpt-5`
 
-内置默认别名：
+内置默认别名：`cursor-agent -> auto`
 
-- `cursor-agent -> auto`
 - `CURSOR_TRUST`：是否自动加 `--trust`，默认开启
 - `CURSOR_APPROVE_MCPS`：是否自动加 `--approve-mcps`
 - `CURSOR_FORCE`：是否自动加 `--force`
 - `CURSOR_SANDBOX`：可选，传给 `--sandbox`
 
-你也可以直接在 `app/config.py` 顶部的 `CONFIG_*` 变量里填写配置。
-优先级规则是：
+你也可以直接在 `app/config.py` 顶部的 `CONFIG_*` 变量里填写配置。优先级规则：
 
 - `CONFIG_*` 有值：优先使用文件内配置
 - `CONFIG_*` 为空字符串：回退使用对应环境变量
 
-## Cursor API Key 的获取与使用
+## Cursor API Key（可选）
 
-### 获取
+在 `cursor.com/dashboard` → Integrations → API Keys 创建 Key（形如 `key_xxxxxxxxxxxxxxxx`）。无需 `agent login` 时，可把 Key 交给 wrapper，由其在调用 `cursor-agent` 时注入子进程环境。
 
-`cursor.com/dashboard` → Integrations → API Keys → Create API Key，复制形如
-`key_xxxxxxxxxxxxxxxx` 的值。仅生成时可见，请立即保存。
-
-### 启动时注入（推荐）
-
-无需执行 `agent login`，直接把 Key 通过环境变量传给 wrapper，wrapper 会在调用
-`cursor-agent` 时把它注入到子进程环境。
-
-PowerShell 临时启动：
+PowerShell 临时启动示例：
 
 ```powershell
 $env:CURSOR_API_KEY = "key_xxxxxxxxxxxxxxxx"
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-永久写入用户环境变量：
+也可使用 `setx CURSOR_API_KEY "..."` 写入用户环境变量，或写在 `app/config.py` 的 `CONFIG_CURSOR_API_KEY`（有值时优先于环境变量）。
 
-```powershell
-setx CURSOR_API_KEY "key_xxxxxxxxxxxxxxxx"
-```
-
-或者直接写到 `app/config.py` 顶部（优先级高于环境变量）：
-
-```python
-CONFIG_CURSOR_API_KEY = "key_xxxxxxxxxxxxxxxx"
-```
-
-### 自检
-
-服务启动后访问 `GET /healthz`，返回里 `cursor_cli.cursor_api_key_configured`
-为 `true` 表示 wrapper 检测到了 Key（值不会被打印出来）。
-
+服务启动后访问 `GET /healthz`，返回中 `cursor_cli.cursor_api_key_configured` 为 `true` 表示已检测到 Key（值不会被打印）。
 
 ## 启动服务
 
@@ -106,23 +81,7 @@ CONFIG_CURSOR_API_KEY = "key_xxxxxxxxxxxxxxxx"
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-启动response回放服务
-```bash
-uvicorn app.mock_startup_main:app --host 0.0.0.0  --port 8000
-```
-
-
-如果你还没有安装独立的 `agent` 命令，可以先在 Windows PowerShell 中执行：
-
-```powershell
-irm 'https://cursor.com/install?win32=true' | iex
-agent --version
-agent login
-```
-
-服务的 `GET /healthz` 会返回当前 `CURSOR_BIN` 是否可用；如果未安装或未配置，会显示 `status: degraded`。
-
-`GET /v1/models` 会实时调用 `agent models`，返回当前 Cursor Agent CLI 实际可用的模型列表。
+`GET /healthz` 会反映 `CURSOR_BIN` 是否可用；未安装或未配置时可能为 `degraded`。`GET /v1/models` 会调用 `agent models`，返回当前 CLI 可用模型列表。
 
 ## 调用示例
 
@@ -173,9 +132,41 @@ agent -p "<prompt>" --output-format stream-json --stream-partial-output
 pytest
 ```
 
-## 配置到openclaw中
+## 已知限制
+
+- 当前仅兼容 `chat.completions`
+- [x] 当前不支持 `tools/function calling`
+- 当前不支持真正的 Cursor 会话续接
+- `messages` 会被压平成单个提示词再发给 Cursor CLI
+
+---
+
+## Tips（周边工具与可选说明）
+
+以下内容多涉及第三方工具、开发辅助或 Cursor 产品本身的通用配置，与「在本机跑起本 wrapper」无强绑定，可按需查阅。
+
+### 安装 Cursor Agent CLI（若尚未有 `agent` 命令）
+
+在 Windows PowerShell 中可执行：
+
+```powershell
+irm 'https://cursor.com/install?win32=true' | iex
+agent --version
+agent login
+```
+
+### Mock 回放服务（开发/联调）
+
+```bash
+uvicorn app.mock_startup_main:app --host 0.0.0.0 --port 8000
+```
+
+### 接入 OpenClaw 的示例配置
+
+在 OpenClaw 中将 `baseUrl` 指向本服务，例如：
 
 ```json
+{
   "models": {
     "providers": {
       "cursorcli": {
@@ -272,14 +263,18 @@ pytest
       }
     }
   }
+}
 ```
 
+OpenClaw 侧若需分段输出，可配置（具体以 OpenClaw 文档为准）：
 
-### 增加分段输出
+```
 agents.defaults.blockStreamingDefault = "on"
 agents.defaults.blockStreamingBreak = "text_end"
+```
 
-### 块段输出配置
+更细的块流参数示例：
+
 ```
 "agents": {
   "defaults": {
@@ -299,7 +294,6 @@ agents.defaults.blockStreamingBreak = "text_end"
 }
 ```
 
-
 | 字段 | 默认值 | 说明 |
 |---|---|---|
 | `blockStreamingChunk.minChars` | `800` | 低于此字数不投递，继续等 |
@@ -308,7 +302,7 @@ agents.defaults.blockStreamingBreak = "text_end"
 | `blockStreamingCoalesce.idleMs` | — | 空闲多少毫秒后把小块合并发出 |
 | `channels.tt.textChunkLimit` | — | TT 通道独立硬上限（覆盖 maxChars） |
 
-这是 `breakPreference` 的优先级降级链，chunker 会从最高优先级开始找，找到就切，找不到才降到下一个：
+`breakPreference` 的优先级降级链（chunker 从高到低尝试，找不到则降到下一级）：
 
 | 优先级 | 名称 | 实际匹配的分隔符 |
 |---|---|---|
@@ -318,31 +312,14 @@ agents.defaults.blockStreamingBreak = "text_end"
 | 4 | `whitespace` | 空格 ` `（单词边界） |
 | 5 | 强切（fallback） | 直接在 `maxChars` 位置硬截断，不管在哪 |
 
-## cursor cli的配置
-配置文件地址：`%USERPROFILE%\.cursor\cli-config.json`
+### Cursor CLI 全局配置（非本仓库）
+
+配置文件路径（Windows）：`%USERPROFILE%\.cursor\cli-config.json`
 
 ```json
 {
-  "approvalMode": "unrestricted",
-
+  "approvalMode": "unrestricted"
 }
-
 ```
 
-- `approvalMode`:允许执行所有命令
-
-## 已知限制
-
-- 当前仅兼容 `chat.completions`
-- [x] 当前不支持 `tools/function calling`
-- 当前不支持真正的 Cursor 会话续接
-- `messages` 会被压平成单个提示词再发给 Cursor CLI
-
-## TTFT优化
-
-| 字段 | 含义 |
-|------|------|
-| `spawn_elapsed_s` | 仅 `create_subprocess_exec`  await 时长（本地起句柄）。 |
-| `since_popen_first_stdout_read_s` | 子进程已返回后，到**第一次**从 stdout 读到数据：偏「子进程/运行时冷启动 + 初始化到开始写管道」。 |
-| `since_popen_s`（首条 ndjson 行） | 到首条完整 NDJSON：通常与上一项接近，除非首 read 未含换行。 |
-| `since_first_ndjson_line_s`（thinking / assistant 首条） | **首条 NDJSON 行之后**到首段「思考/正文」：更贴近「管线已通之后」的**远端/模型首 token**（若先有 `system/init` 再 thinking，这段会吃掉「init 完成 → 模型开始吐字」）。 |
+- `approvalMode`：例如 `unrestricted` 表示允许执行相关命令策略（以 Cursor 官方说明为准）。

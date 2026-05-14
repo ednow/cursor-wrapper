@@ -1,3 +1,13 @@
+## TTFT优化
+
+| 字段 | 含义 |
+|------|------|
+| `spawn_elapsed_s` | 仅 `create_subprocess_exec`  await 时长（本地起句柄）。 |
+| `since_popen_first_stdout_read_s` | 子进程已返回后，到**第一次**从 stdout 读到数据：偏「子进程/运行时冷启动 + 初始化到开始写管道」。 |
+| `since_popen_s`（首条 ndjson 行） | 到首条完整 NDJSON：通常与上一项接近，除非首 read 未含换行。 |
+| `since_first_ndjson_line_s`（thinking / assistant 首条） | **首条 NDJSON 行之后**到首段「思考/正文」：更贴近「管线已通之后」的**远端/模型首 token**（若先有 `system/init` 再 thinking，这段会吃掉「init 完成 → 模型开始吐字」）。 |
+
+## 分析
 下面按**文件末尾这次请求**（`completion_id=chatcmpl-1033f3524b4c4815992590c380a4f53e`，约 16:11:01→16:11:58）解读；依据是你刚加上的 `cursor_cli` INFO 行。
 
 ## 关键 INFO 行（原文要点）
