@@ -17,8 +17,10 @@ class MessageContentPart(BaseModel):
 class ChatMessage(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    role: Literal["system", "user", "assistant"]
+    role: Literal["system", "user", "assistant", "tool"]
     content: str | list[MessageContentPart]
+    tool_call_id: str | None = None
+    name: str | None = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -48,7 +50,17 @@ def flatten_messages(messages: list[ChatMessage]) -> str:
         content = message_content_to_text(message.content).strip()
         if not content:
             continue
-        prompt_parts.append(f"{message.role.upper()}:\n{content}")
+        if message.role == "tool":
+            # Keep tool result context visible for the downstream CLI prompt.
+            if message.name:
+                role_label = f"TOOL[{message.name}]"
+            elif message.tool_call_id:
+                role_label = f"TOOL[{message.tool_call_id}]"
+            else:
+                role_label = "TOOL"
+        else:
+            role_label = message.role.upper()
+        prompt_parts.append(f"{role_label}:\n{content}")
     return "\n\n".join(prompt_parts)
 
 
