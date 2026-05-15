@@ -19,10 +19,19 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from .daily_log_file import DailyDatedFileHandler
 from .openai_schema import (
     ChatCompletionRequest,
+    ChatMessage,
+    ResponsesCreateRequest,
     flatten_messages,
     make_chat_completion_chunk,
     make_chat_completion_response,
     make_models_response,
+    make_response_object,
+    make_responses_output_item_added_message,
+    make_responses_output_item_done_message,
+    make_responses_output_text_delta,
+    make_responses_stream_completed,
+    make_responses_stream_created,
+    responses_input_to_chat_messages,
 )
 from .sse_frame import sse_comment, sse_data
 
@@ -201,6 +210,20 @@ def _log_chat_request_debug(body: ChatCompletionRequest, prompt: str, model: str
     logger.debug("prompt (mock replay, not sent to CLI):\n%s", prompt[:500])
 
 
+def _log_responses_request_debug(
+    body: ResponsesCreateRequest, messages: list[ChatMessage], prompt: str, model: str
+) -> None:
+    """与 ``app.main`` 的 ``/v1/responses`` 入口 debug 对齐。"""
+    logger.debug("===== /v1/responses =====")
+    logger.debug("model (requested): %s -> (resolved): %s", model, model)
+    logger.debug("stream: %s", body.stream)
+    logger.debug("messages (%d):", len(messages))
+    for i, msg in enumerate(messages):
+        text = msg.content if isinstance(msg.content, str) else str(msg.content)
+        logger.debug("  [%d] %s: %s", i, msg.role, text[:200])
+    logger.debug("prompt (mock replay, not sent to CLI):\n%s", prompt[:500])
+
+
 async def async_iter_replay_sse(
     cfg: MockStartupFile,
     completion_id: str,
@@ -292,6 +315,107 @@ async def async_iter_replay_sse(
             )
 
 
+async def async_iter_replay_responses_sse(
+    cfg: MockStartupFile,
+    response_id: str,
+    item_id: str,
+    model: str,
+    *,
+    skip_delays: bool,
+    debug_log: logging.Logger | None = None,
+) -> AsyncIterator[str]:
+    """按同一 ``steps`` 配置产出与 ``app.main`` ``/v1/responses`` 流式一致的 SSE（Responses 事件序列）。"""
+    keepalive_sec = float(os.getenv("CURSOR_STREAM_KEEPALIVE_SECONDS", "12"))
+    n_chunks = 0
+    total_chars = 0
+    last_progress_log = 0
+    collected: list[str] = []
+
+    created_at = int(time.time())
+    yield sse_data(
+        make_responses_stream_created(response_id=response_id, model=model, created_at=created_at)
+    )
+    yield sse_data(make_responses_output_item_added_message(item_id=item_id, output_index=0))
+
+    if debug_log:
+        debug_log.debug(
+            "responses stream started response_id=%s item_id=%s keepalive_s=%s",
+            response_id,
+            item_id,
+            keepalive_sec,
+        )
+
+    for step in cfg.steps:
+        if not skip_delays and step.delay_before_s > 0:
+            await asyncio.sleep(step.delay_before_s)
+        if step.event == "keepalive":
+            yield sse_comment(
+                f"cursor-wrapper keepalive chunks={step.chunks} chars={step.chars}"
+            )
+            if debug_log:
+                debug_log.debug(
+                    "responses stream keepalive response_id=%s chunks=%d chars=%d",
+                    response_id,
+                    step.chunks,
+                    step.chars,
+                )
+            continue
+        body = _delta_body_from_step_content(step.content or "")
+        if body is None:
+            continue
+        n_chunks += 1
+        chunk_len = len(body)
+        total_chars += chunk_len
+        collected.append(body)
+        if debug_log:
+            debug_log.debug(
+                "responses stream chunk response_id=%s n=%d len=%d body=%s",
+                response_id,
+                n_chunks,
+                chunk_len,
+                body,
+            )
+            if total_chars - last_progress_log >= 8192:
+                last_progress_log = total_chars
+                debug_log.debug(
+                    "responses stream progress response_id=%s chunks=%d chars=%d",
+                    response_id,
+                    n_chunks,
+                    total_chars,
+                )
+        yield sse_data(make_responses_output_text_delta(item_id=item_id, delta=body))
+
+    if cfg.include_stop_and_done:
+        tail = cfg.tail_silence_before_done_s
+        if tail > 0 and not skip_delays:
+            await asyncio.sleep(tail)
+            if debug_log:
+                debug_log.debug(
+                    "responses stream tail silence response_id=%s waited_s=%.3f",
+                    response_id,
+                    tail,
+                )
+        full_response = "".join(collected)
+        yield sse_data(
+            make_responses_output_item_done_message(
+                item_id=item_id,
+                full_text=full_response,
+                output_index=0,
+            )
+        )
+        yield sse_data(make_responses_stream_completed(response_id=response_id, model=model))
+        if debug_log:
+            cap = _preview_cap()
+            preview = full_response if cap is None else full_response[:cap]
+            debug_log.debug(
+                "responses stream done response_id=%s chunks=%d chars=%d preview=%s",
+                response_id,
+                n_chunks,
+                len(full_response),
+                preview,
+            )
+
+
 def _concat_chunk_text(cfg: MockStartupFile) -> str:
     parts: list[str] = []
     for step in cfg.steps:
@@ -354,7 +478,7 @@ async def lifespan(app: FastAPI):
         app.state.mock_replay_cfg = cfg
         on_start = _replay_on_startup_enabled()
         logger.info(
-            "mock replay service: config loaded steps=%d path=%s (startup_replay=%s; replay on POST /v1/chat/completions)",
+            "mock replay service: config loaded steps=%d path=%s (startup_replay=%s; replay on POST /v1/chat/completions and /v1/responses)",
             len(cfg.steps),
             config_path,
             on_start,
@@ -441,6 +565,54 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         )
         response["created"] = int(time.time())
         return response
+
+    @application.post("/v1/responses")
+    async def create_response(request: Request, body: ResponsesCreateRequest):
+        cfg = get_mock_cfg(request)
+        messages = responses_input_to_chat_messages(body.input)
+        if not messages:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No usable messages were parsed from input.",
+            )
+        prompt = flatten_messages(messages)
+        model = (body.model or "").strip() or cfg.replay_model
+        _log_responses_request_debug(body, messages, prompt, model)
+        if not prompt.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No text messages were provided.",
+            )
+        response_id = os.getenv("MOCK_SSE_RESPONSE_ID", "").strip() or f"resp_{uuid.uuid4().hex}"
+        item_id = os.getenv("MOCK_SSE_RESPONSE_ITEM_ID", "").strip() or f"msg_{uuid.uuid4().hex}"
+        skip = _replay_skip_delays()
+
+        if body.stream:
+
+            async def responses_event_stream() -> AsyncIterator[str]:
+                async for piece in async_iter_replay_responses_sse(
+                    cfg,
+                    response_id,
+                    item_id,
+                    model,
+                    skip_delays=skip,
+                    debug_log=logger,
+                ):
+                    yield piece
+
+            return StreamingResponse(
+                responses_event_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+        text = _concat_chunk_text(cfg)
+        logger.info("responses (%d chars): %s", len(text), text[:300])
+        return make_response_object(text=text, model=model, response_id=response_id, created_at=int(time.time()))
 
     return application
 

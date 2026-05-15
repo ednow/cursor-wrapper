@@ -45,17 +45,17 @@ def _override_settings() -> Settings:
     )
 
 
-def test_chat_completions_stream() -> None:
+def test_responses_stream_list_input() -> None:
     app.dependency_overrides[get_settings] = _override_settings
     app.dependency_overrides[get_cursor_cli] = lambda: FakeStreamingCursorCLI()
 
     client = TestClient(app)
     with client.stream(
         "POST",
-        "/v1/chat/completions",
+        "/v1/responses",
         json={
-            "messages": [
-                {"role": "user", "content": "Stream hello"},
+            "input": [
+                {"type": "message", "role": "user", "content": "Stream hello"},
             ],
             "stream": True,
         },
@@ -66,9 +66,18 @@ def test_chat_completions_stream() -> None:
 
     assert response.status_code == 200
     assert "data:" in payload
-    assert '"role": "assistant"' in payload
+    assert '"type": "response.created"' in payload
+    assert '"type": "response.output_text.delta"' in payload
     greeting_json = json.dumps(WRAPPER_RESPONSE_GREETING_TEXT, ensure_ascii=False)[1:-1]
-    assert f'"content": "{greeting_json}"' in payload
-    assert '"content": "Hel"' in payload
-    assert '"content": "lo"' in payload
-    assert "data: [DONE]" in payload
+    assert f'"delta": "{greeting_json}"' in payload
+    assert '"type": "response.output_text.done"' in payload
+    assert f'"text": "{greeting_json}"' in payload
+    assert payload.count('"type": "response.output_item.added"') == 2
+    assert payload.count('"type": "response.output_item.done"') == 2
+    greeting_item_done_pos = payload.index('"type": "response.output_item.done"')
+    body_item_added_pos = payload.rindex('"type": "response.output_item.added"')
+    hel_delta_pos = payload.index('"delta": "Hel"')
+    assert greeting_item_done_pos < body_item_added_pos < hel_delta_pos
+    assert '"delta": "Hel"' in payload
+    assert '"delta": "lo"' in payload
+    assert '"type": "response.completed"' in payload

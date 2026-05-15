@@ -30,6 +30,15 @@ CONFIG_LOG_RESPONSE_PREVIEW_MAX_LEN = ""
 # 流式 NDJSON 读完后是否在生成器内同步等待子进程收尾（True=旧行为，含非零退出时抛错）；默认 False 为异步收尾
 # True or False
 CONFIG_CURSOR_STREAM_SYNC_CLI_REAP = ""
+# 为 True 时，传给 CLI 的 -p 改为「我的问题：最后一条用户消息 + 按需读取 prompt 文件」的桥接文案；完整多轮上下文写入工作区 prompt 目录下的文件
+# True / False；留空字符串 "" 时改读环境变量 CURSOR_CLI_LAST_USER_CONTEXT_BRIDGE
+CONFIG_CLI_LAST_USER_CONTEXT_BRIDGE = ""
+# 是否在助手回复开头附带一句即时问候（流式为先发一条 content chunk，非流式为前缀）；默认开启
+# True / False；留空字符串 "" 时改读环境变量 WRAPPER_RESPONSE_GREETING
+CONFIG_WRAPPER_RESPONSE_GREETING = False
+
+# 开启 WRAPPER_RESPONSE_GREETING 时使用的问候文案（固定）
+WRAPPER_RESPONSE_GREETING_TEXT = "收到，正在为你处理\n\n"
 
 DEFAULT_MODEL_ALIASES = {
     "cursor-agent": "auto",
@@ -60,7 +69,11 @@ DEFAULT_MODEL_ALIASES = {
 }
 
 
-def _pick_config_or_env(config_value: str, env_name: str, default: str | None = None) -> str | None:
+def _pick_config_or_env(
+    config_value: str | bool, env_name: str, default: str | None = None
+) -> str | None:
+    if isinstance(config_value, bool):
+        return "true" if config_value else "false"
     if config_value.strip():
         return config_value.strip()
 
@@ -129,6 +142,8 @@ class Settings:
     log_level: str = "info"
     log_response_preview_max_len: int | None = None
     stream_sync_cli_reap: bool = False
+    cli_last_user_context_bridge: bool = False
+    response_greeting: bool = True
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -178,6 +193,20 @@ class Settings:
                     "CURSOR_STREAM_SYNC_CLI_REAP",
                 ),
                 default=False,
+            ),
+            cli_last_user_context_bridge=_parse_bool(
+                _pick_config_or_env(
+                    CONFIG_CLI_LAST_USER_CONTEXT_BRIDGE,
+                    "CURSOR_CLI_LAST_USER_CONTEXT_BRIDGE",
+                ),
+                default=False,
+            ),
+            response_greeting=_parse_bool(
+                _pick_config_or_env(
+                    CONFIG_WRAPPER_RESPONSE_GREETING,
+                    "WRAPPER_RESPONSE_GREETING",
+                ),
+                default=True,
             ),
         )
 

@@ -1,13 +1,25 @@
 # Cursor CLI OpenAI Wrapper
 
-将本机的 `Cursor CLI` 包装成一个兼容 `OpenAI Chat Completions API` 的 HTTP 服务，便于直接复用现有 `OpenAI SDK`、`curl` 或第三方客户端。
+将本机的 `Cursor CLI` 包装成兼容 **OpenAI Chat Completions** 与 **Responses** 的 HTTP 服务，便于直接复用 `OpenAI SDK`、`curl` 或第三方客户端（将 `base_url` 指到本服务的 `/v1`）。
 
 ## 当前能力
 
-- `POST /v1/chat/completions`
+### 正式服务（`uvicorn app.main:app`）
+
+- `GET /healthz`：健康检查，并反映 Cursor CLI 是否可用
+- `GET /v1/models`：列出当前 CLI 可用模型（内部会调用 `agent models`）
+- `POST /v1/chat/completions`：对话补全
+- `POST /v1/responses`：Responses API；请求里的 `input` 会解析为内部消息后，与 Chat 共用同一套 CLI 调用、greeting、流式 keepalive 等逻辑
+- Chat 与 Responses 均支持普通 JSON 响应，以及 `stream=true` 时的 SSE 流式输出
+
+### Mock 回放服务（`uvicorn app.mock_startup_main:app`）
+
+用于开发或联调：按 JSON 剧本重放流式/非流式响应，**不**调用真实 Cursor CLI。对外 **HTTP 路径与正式服务相同**：
+
+- `GET /healthz`（响应中会标明 `service: mock-replay-api`）
 - `GET /v1/models`
-- `GET /healthz`
-- 支持普通响应和 `stream=true` 的 SSE 流式输出
+- `POST /v1/chat/completions`
+- `POST /v1/responses`
 
 ## 前置条件
 
@@ -157,6 +169,8 @@ agent login
 
 ### Mock 回放服务（开发/联调）
 
+接口列表见上文「当前能力 → Mock 回放服务」。默认从仓库内 `mock/mock_startup_outputs.json` 读取剧本；可通过环境变量 `MOCK_STARTUP_CONFIG` 指定其它 JSON 路径（详见 `app/mock_startup_main.py`）。
+
 ```bash
 uvicorn app.mock_startup_main:app --host 0.0.0.0 --port 8000
 ```
@@ -286,7 +300,7 @@ agents.defaults.blockStreamingBreak = "text_end"
         "breakPreference": "paragraph"
       },
       "blockStreamingCoalesce": {
-        "minChars": 100,
+        "minChars": 1,
         "maxChars": 3800,
         "idleMs": 6000
       }
@@ -323,3 +337,13 @@ agents.defaults.blockStreamingBreak = "text_end"
 ```
 
 - `approvalMode`：例如 `unrestricted` 表示允许执行相关命令策略（以 Cursor 官方说明为准）。
+
+### 修改tt的回复表情
+```
+"channels": {
+    "tt": {
+      "enabled": true,
+      "reactionExpr": "[好的]"
+    }
+  }
+```

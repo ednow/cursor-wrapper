@@ -41,25 +41,23 @@ def _override_settings() -> Settings:
     )
 
 
-def test_chat_completions_non_stream() -> None:
+def test_responses_non_stream_string_input() -> None:
     app.dependency_overrides[get_settings] = _override_settings
     app.dependency_overrides[get_cursor_cli] = lambda: FakeCursorCLI()
 
     client = TestClient(app)
     response = client.post(
-        "/v1/chat/completions",
-        json={
-            "messages": [
-                {"role": "user", "content": "Say hi"},
-            ]
-        },
+        "/v1/responses",
+        json={"input": "Say hi"},
     )
 
     app.dependency_overrides.clear()
 
     assert response.status_code == 200
     body = response.json()
-    assert body["object"] == "chat.completion"
+    assert body["object"] == "response"
     assert body["model"] == "cursor-agent"
-    assert body["choices"][0]["message"]["content"] == f"{WRAPPER_RESPONSE_GREETING_TEXT}hi"
-    assert body["choices"][0]["finish_reason"] == "stop"
+    assert body["status"] == "completed"
+    assert body["id"] == "req-123"
+    assert body["output_text"] == f"{WRAPPER_RESPONSE_GREETING_TEXT}hi"
+    assert body["output"][0]["content"][0]["text"] == f"{WRAPPER_RESPONSE_GREETING_TEXT}hi"

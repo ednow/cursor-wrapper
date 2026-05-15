@@ -291,6 +291,24 @@ class CursorCLIAdapter:
         )
         return bridged_prompt, file_path
 
+    def persist_full_prompt_for_bridge(self, content: str) -> str:
+        """将完整多轮上下文写入工作区 ``prompt/`` 下文件，供 last-user bridge 模式引用。"""
+        prompt_dir = self._prompt_dir()
+        fd, file_path = tempfile.mkstemp(
+            prefix="cursor-wrapper-prompt-",
+            suffix=".txt",
+            dir=str(prompt_dir),
+            text=True,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as fp:
+            fp.write(content)
+        logger.info(
+            "cli last-user bridge: full context externalized (%d chars) -> %s",
+            len(content),
+            file_path,
+        )
+        return file_path
+
     def _build_models_command(self) -> list[str]:
         prefix, uses_cursor_frontend = self._build_agent_entry_prefix()
         command = [*prefix]
@@ -384,6 +402,40 @@ class CursorCLIAdapter:
         We only process summary events to avoid duplication.
         """
         return payload.get("type") == "assistant" and "timestamp_ms" not in payload
+
+    @staticmethod
+    def _compute_assistant_segment_delta(streamed: str, text: str) -> tuple[str, str]:
+        """计算 assistant 段内某个 ``text`` part 相对段累计 ``streamed`` 的差量。
+
+        Cursor CLI 的 stream-json 在 ``--stream-partial-output`` 下，一段 assistant
+        文本通常以两种形式出现且都带 ``timestamp_ms``：
+
+        1. 多条小粒度 delta（每条只携带最新片段，``text`` 是片段本身）；
+        2. 末尾一条完整镜像 delta（``text`` 等于该段累计文本）。
+
+        若只按事件类型透传 ``text``，整段内容会被发两次。本方法返回新的段累计与
+        本次需要 yield 的差量字符串：
+
+        - ``text == streamed``：完整镜像，``delta=""``，``streamed`` 不变。
+        - ``streamed`` 非空且 ``text.startswith(streamed)``：镜像 / 扩展，
+          ``delta`` 为 ``text[len(streamed):]``，``streamed`` 更新为 ``text``。
+        - ``streamed`` 非空且 ``streamed.endswith(text)``：末尾子串镜像（兜底），
+          ``delta=""``，``streamed`` 不变。
+        - 其他：作为 CLI 的纯增量片段，``delta=text``，``streamed`` 追加 ``text``。
+
+        段切换由调用方负责（看到 ``tool_call`` / 新一轮 ``thinking`` 时清零 ``streamed``）。
+        """
+        if not text:
+            return streamed, ""
+        if text == streamed:
+            return streamed, ""
+        if streamed and text.startswith(streamed):
+            return text, text[len(streamed):]
+        if streamed and streamed.endswith(text):
+            return streamed, ""
+        if not streamed:
+            return text, text
+        return streamed + text, text
 
     @staticmethod
     def _extract_assistant_text_from_ndjson(raw: str) -> tuple[str, str | None, str | None, int | None]:
@@ -591,6 +643,9 @@ class CursorCLIAdapter:
         first_thinking_text_logged = False
         first_assistant_text_logged = False
         boot_timings: dict[str, float] = {}
+        # 当前 assistant 段内已下发给上游的累计文本；详见 _compute_assistant_segment_delta。
+        # tool_call / 新一轮 thinking 出现时视为段切换并清零。
+        assistant_streamed: str = ""
 
         try:
             async for line in self._iter_ndjson_lines(process.stdout, boot_timings=boot_timings):
@@ -649,6 +704,7 @@ class CursorCLIAdapter:
                 if event_type == "thinking" and subtype == "delta":
                     if not thinking_started:
                         thinking_started = True
+                        assistant_streamed = ""
                         yield "> 💭 **思考中：**\n> "
                     text = payload.get("text", "")
                     if text:
@@ -700,10 +756,19 @@ class CursorCLIAdapter:
                                 len(acc),
                             )
                     for part in content:
-                        if part.get("type") == "text" and part.get("text"):
-                            yield part["text"]
+                        if part.get("type") != "text":
+                            continue
+                        text = part.get("text")
+                        if not text:
+                            continue
+                        assistant_streamed, delta_text = (
+                            self._compute_assistant_segment_delta(assistant_streamed, text)
+                        )
+                        if delta_text:
+                            yield delta_text
 
                 elif event_type == "tool_call":
+                    assistant_streamed = ""
                     hint = self._format_tool_call_hint(payload)
                     if hint:
                         yield hint
