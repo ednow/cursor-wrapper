@@ -388,11 +388,31 @@ def make_responses_output_item_added_message(*, item_id: str, output_index: int 
     }
 
 
-def make_responses_output_text_delta(*, item_id: str, delta: str, output_index: int = 0) -> dict:
+def make_responses_content_part_added(
+    *, item_id: str, output_index: int = 0, content_index: int = 0
+) -> dict:
+    """OpenClaw pi-ai 在 ``content`` 为空时会丢弃所有 ``output_text.delta``，必须先发此事件。"""
+    return {
+        "type": "response.content_part.added",
+        "output_index": output_index,
+        "item_id": item_id,
+        "content_index": content_index,
+        "part": {
+            "type": "output_text",
+            "text": "",
+            "annotations": [],
+        },
+    }
+
+
+def make_responses_output_text_delta(
+    *, item_id: str, delta: str, output_index: int = 0, content_index: int = 0
+) -> dict:
     return {
         "type": "response.output_text.delta",
         "output_index": output_index,
         "item_id": item_id,
+        "content_index": content_index,
         "delta": delta,
     }
 
@@ -412,9 +432,10 @@ def make_responses_output_text_done(
 def greeting_output_item_events(
     *, item_id: str, text: str, output_index: int = 0
 ) -> list[dict]:
-    """Responses 流：独立 greeting ``output_item`` 生命周期（added → delta → text.done → item.done）。"""
+    """Responses 流：独立 greeting ``output_item`` 生命周期（added → content_part → delta → text.done → item.done）。"""
     return [
         make_responses_output_item_added_message(item_id=item_id, output_index=output_index),
+        make_responses_content_part_added(item_id=item_id, output_index=output_index),
         make_responses_output_text_delta(item_id=item_id, delta=text, output_index=output_index),
         make_responses_output_text_done(item_id=item_id, text=text, output_index=output_index),
         make_responses_output_item_done_message(

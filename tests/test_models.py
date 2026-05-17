@@ -1,24 +1,14 @@
 from fastapi.testclient import TestClient
 
-from app.config import Settings
 from app.cursor_cli import CursorCLIAdapter
 from app.main import app, get_cursor_cli, get_settings
+from helpers import make_test_settings
 
 
 class FakeModelsCursorCLI(CursorCLIAdapter):
     def __init__(self) -> None:
         super().__init__(
-            Settings(
-                cursor_bin="agent",
-                cursor_workspace=".",
-                wrapper_api_key=None,
-                default_model="cursor-agent",
-                model_aliases={"cursor-agent": "auto"},
-                trust_workspace=True,
-                approve_mcps=False,
-                force=False,
-                sandbox=None,
-            )
+            make_test_settings(model_aliases={"cursor-agent": "auto"}),
         )
 
     async def list_available_models(self) -> list[dict[str, str | bool]]:
@@ -38,22 +28,10 @@ class FakeModelsCursorCLI(CursorCLIAdapter):
         ]
 
 
-def _override_settings() -> Settings:
-    return Settings(
-        cursor_bin="agent",
-        cursor_workspace=".",
-        wrapper_api_key=None,
-        default_model="cursor-agent",
-        model_aliases={"cursor-agent": "auto"},
-        trust_workspace=True,
-        approve_mcps=False,
-        force=False,
-        sandbox=None,
-    )
-
-
 def test_models_endpoint_uses_cli_models() -> None:
-    app.dependency_overrides[get_settings] = _override_settings
+    app.dependency_overrides[get_settings] = lambda: make_test_settings(
+        model_aliases={"cursor-agent": "auto"},
+    )
     app.dependency_overrides[get_cursor_cli] = lambda: FakeModelsCursorCLI()
 
     client = TestClient(app)

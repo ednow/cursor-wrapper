@@ -1,25 +1,14 @@
 from fastapi.testclient import TestClient
 
-from app.config import WRAPPER_RESPONSE_GREETING_TEXT, Settings
+from app.config import WRAPPER_RESPONSE_ACK_TEXT_CURSOR, WRAPPER_RESPONSE_GREETING_TEXT
 from app.cursor_cli import CursorCLIAdapter, CursorCLIResult
-from app.main import app, get_cursor_cli, get_settings
+from app.main import app, get_agent_scheduler, get_settings
+from helpers import FakeAgentScheduler, make_test_settings
 
 
 class FakeCursorCLI(CursorCLIAdapter):
     def __init__(self) -> None:
-        super().__init__(
-            Settings(
-                cursor_bin="agent",
-                cursor_workspace=".",
-                wrapper_api_key=None,
-                default_model="cursor-agent",
-                model_aliases={},
-                trust_workspace=True,
-                approve_mcps=False,
-                force=False,
-                sandbox=None,
-            )
-        )
+        super().__init__(make_test_settings())
 
     async def run_chat(self, prompt: str, model: str) -> CursorCLIResult:
         assert "USER:\nSay hi" in prompt
@@ -27,23 +16,10 @@ class FakeCursorCLI(CursorCLIAdapter):
         return CursorCLIResult(text="hi", request_id="req-123")
 
 
-def _override_settings() -> Settings:
-    return Settings(
-        cursor_bin="agent",
-        cursor_workspace=".",
-        wrapper_api_key=None,
-        default_model="cursor-agent",
-        model_aliases={},
-        trust_workspace=True,
-        approve_mcps=False,
-        force=False,
-        sandbox=None,
-    )
-
-
 def test_chat_completions_non_stream() -> None:
-    app.dependency_overrides[get_settings] = _override_settings
-    app.dependency_overrides[get_cursor_cli] = lambda: FakeCursorCLI()
+    fake_cli = FakeCursorCLI()
+    app.dependency_overrides[get_settings] = lambda: make_test_settings()
+    app.dependency_overrides[get_agent_scheduler] = lambda: FakeAgentScheduler(fake_cli)
 
     client = TestClient(app)
     response = client.post(
@@ -61,5 +37,8 @@ def test_chat_completions_non_stream() -> None:
     body = response.json()
     assert body["object"] == "chat.completion"
     assert body["model"] == "cursor-agent"
-    assert body["choices"][0]["message"]["content"] == f"{WRAPPER_RESPONSE_GREETING_TEXT}hi"
+    assert (
+        body["choices"][0]["message"]["content"]
+        == f"{WRAPPER_RESPONSE_GREETING_TEXT}{WRAPPER_RESPONSE_ACK_TEXT_CURSOR}hi"
+    )
     assert body["choices"][0]["finish_reason"] == "stop"

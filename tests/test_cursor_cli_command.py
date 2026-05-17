@@ -1,19 +1,9 @@
-from app.config import Settings
 from app.cursor_cli import CursorCLIAdapter
+from helpers import make_test_settings
 
 
 def test_build_command_without_cursor_bin_keeps_agent_mode() -> None:
-    settings = Settings(
-        cursor_bin="agent",
-        cursor_workspace=".",
-        wrapper_api_key=None,
-        default_model="cursor-agent",
-        model_aliases={},
-        trust_workspace=True,
-        approve_mcps=False,
-        force=False,
-        sandbox=None,
-    )
+    settings = make_test_settings()
     adapter = CursorCLIAdapter(settings)
 
     command = adapter._build_command("hello", "auto", stream=False)

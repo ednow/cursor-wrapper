@@ -1,25 +1,15 @@
 from fastapi.testclient import TestClient
 
-from app.config import Settings
 from app.main import app, get_settings
-
-
-def _override_settings() -> Settings:
-    return Settings(
-        cursor_bin="missing-agent",
-        cursor_workspace=".",
-        wrapper_api_key=None,
-        default_model="cursor-agent",
-        model_aliases={},
-        trust_workspace=True,
-        approve_mcps=False,
-        force=False,
-        sandbox=None,
-    )
+from helpers import make_test_settings
 
 
 def test_healthz_reports_missing_cursor_cli() -> None:
-    app.dependency_overrides[get_settings] = _override_settings
+    app.dependency_overrides[get_settings] = lambda: make_test_settings(
+        cursor_bin="missing-agent",
+        claude_bin="missing-claude",
+        agent_schedule=("cursor", "claude"),
+    )
 
     client = TestClient(app)
     response = client.get("/healthz")

@@ -26,6 +26,7 @@ from .openai_schema import (
     make_chat_completion_response,
     make_models_response,
     make_response_object,
+    make_responses_content_part_added,
     make_responses_output_item_added_message,
     make_responses_output_item_done_message,
     make_responses_output_text_delta,
@@ -336,6 +337,7 @@ async def async_iter_replay_responses_sse(
         make_responses_stream_created(response_id=response_id, model=model, created_at=created_at)
     )
     yield sse_data(make_responses_output_item_added_message(item_id=item_id, output_index=0))
+    yield sse_data(make_responses_content_part_added(item_id=item_id, output_index=0))
 
     if debug_log:
         debug_log.debug(

@@ -12,7 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator
 
+from .cli_base import AGENT_CURSOR, CLIError, agent_cli_label, finish_stream_subprocess
 from .config import Settings
+from .stream_chat_session import StreamChatSession
+
+logger = logging.getLogger("cursor-wrapper")
 
 logger = logging.getLogger("cursor-wrapper")
 
@@ -28,11 +32,28 @@ class CursorCLIResult:
     duration_ms: int | None = None
 
 
-class CursorCLIError(RuntimeError):
-    def __init__(self, message: str, *, exit_code: int | None = None, stderr: str = "") -> None:
-        super().__init__(message)
-        self.exit_code = exit_code
-        self.stderr = stderr
+class CursorCLIError(CLIError):
+    pass
+
+
+async def _finish_cursor_cli_stream_subprocess(
+    process: asyncio.subprocess.Process,
+    stderr_task: asyncio.Task,
+    ended_on_result: bool,
+    session_id: str | None,
+    request_id: str | None,
+    *,
+    raise_on_error: bool,
+) -> None:
+    await finish_stream_subprocess(
+        process,
+        stderr_task,
+        ended_on_result,
+        session_id,
+        request_id,
+        agent_label=agent_cli_label(AGENT_CURSOR),
+        raise_on_error=raise_on_error,
+    )
 
 
 async def _reap_after_stream_json_result_event(
@@ -105,16 +126,41 @@ class CursorCLIAdapter:
         self.settings = settings
 
     @classmethod
+    def _stdout_read_idle_log_seconds(cls) -> float:
+        raw = os.getenv("CURSOR_CLI_STDOUT_READ_IDLE_LOG_SECONDS", "30")
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            return 30.0
+
+    @classmethod
     async def _iter_ndjson_lines(
         cls,
         stream: asyncio.StreamReader,
         *,
         boot_timings: dict[str, float] | None = None,
+        subprocess_pid: int | None = None,
     ) -> AsyncIterator[str]:
         buffer = bytearray()
         first_read_done = False
+        idle_log_s = cls._stdout_read_idle_log_seconds()
         while True:
-            chunk = await stream.read(cls._STDOUT_READ_CHUNK_SIZE)
+            if idle_log_s > 0:
+                try:
+                    chunk = await asyncio.wait_for(
+                        stream.read(cls._STDOUT_READ_CHUNK_SIZE),
+                        timeout=idle_log_s,
+                    )
+                except asyncio.TimeoutError:
+                    logger.info(
+                        "cli stdout read still waiting idle_s>=%.0f pid=%s pending_buffer=%d",
+                        idle_log_s,
+                        subprocess_pid if subprocess_pid is not None else "?",
+                        len(buffer),
+                    )
+                    continue
+            else:
+                chunk = await stream.read(cls._STDOUT_READ_CHUNK_SIZE)
             if not first_read_done:
                 first_read_done = True
                 if boot_timings is not None:
@@ -583,7 +629,13 @@ class CursorCLIAdapter:
             return f"\n\n> 🔧 调用工具: {tool_name} ({args_summary})\n\n"
         return f"\n\n> 🔧 调用工具: {tool_name}\n\n"
 
-    async def stream_chat(self, prompt: str, model: str) -> AsyncIterator[str]:
+    async def stream_chat(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        session: StreamChatSession | None = None,
+    ) -> AsyncIterator[str]:
         """Real-time streaming with tool call hints.
 
         Uses delta events (with timestamp_ms) for real-time text output.
@@ -620,8 +672,9 @@ class CursorCLIAdapter:
         spawn_elapsed_s = time.perf_counter() - t_spawn
         t_after_popen = time.perf_counter()
         logger.info(
-            "cli stream_chat subprocess spawned pid=%s model=%r spawn_elapsed_s=%.3f "
+            "[%s] stream_chat subprocess spawned pid=%s model=%r spawn_elapsed_s=%.3f "
             "prepare_prompt_elapsed_s=%.4f prompt_cli_len=%d workspace=%s",
+            AGENT_CURSOR,
             process.pid,
             model,
             spawn_elapsed_s,
@@ -634,6 +687,8 @@ class CursorCLIAdapter:
         assert process.stderr is not None
 
         stderr_task = asyncio.create_task(process.stderr.read())
+        if session is not None:
+            session.register(process, stderr_task, agent=AGENT_CURSOR)
         thinking_started = False
         ended_on_result = False
         cleanup_scheduled = False
@@ -648,7 +703,11 @@ class CursorCLIAdapter:
         assistant_streamed: str = ""
 
         try:
-            async for line in self._iter_ndjson_lines(process.stdout, boot_timings=boot_timings):
+            async for line in self._iter_ndjson_lines(
+                process.stdout,
+                boot_timings=boot_timings,
+                subprocess_pid=process.pid,
+            ):
                 if not first_ndjson_logged:
                     first_ndjson_logged = True
                     since_spawn_s = time.perf_counter() - t_spawn
@@ -662,9 +721,10 @@ class CursorCLIAdapter:
                     try:
                         peek = json.loads(line)
                         logger.info(
-                            "cli stream_chat first ndjson since_spawn_s=%.3f since_popen_s=%.3f "
+                            "[%s] stream_chat first ndjson since_spawn_s=%.3f since_popen_s=%.3f "
                             "since_popen_first_stdout_read_s=%s read_to_first_line_ms=%s "
                             "line_len=%d event_type=%r subtype=%r",
+                            AGENT_CURSOR,
                             since_spawn_s,
                             since_popen_s,
                             f"{since_popen_first_read_s:.3f}"
@@ -679,9 +739,10 @@ class CursorCLIAdapter:
                         )
                     except json.JSONDecodeError:
                         logger.info(
-                            "cli stream_chat first stdout line since_spawn_s=%.3f since_popen_s=%.3f "
+                            "[%s] stream_chat first stdout line since_spawn_s=%.3f since_popen_s=%.3f "
                             "since_popen_first_stdout_read_s=%s read_to_first_line_ms=%s "
                             "line_len=%d non-json preview=%r",
+                            AGENT_CURSOR,
                             since_spawn_s,
                             since_popen_s,
                             f"{since_popen_first_read_s:.3f}"
@@ -714,8 +775,9 @@ class CursorCLIAdapter:
                             fl = boot_timings.get("first_stdout_line_perf")
                             since_first_line_s = (now - fl) if fl is not None else None
                             logger.info(
-                                "cli stream_chat first thinking text delta since_popen_s=%.3f "
+                                "[%s] stream_chat first thinking text delta since_popen_s=%.3f "
                                 "since_first_ndjson_line_s=%s len=%d",
+                                AGENT_CURSOR,
                                 now - t_after_popen,
                                 f"{since_first_line_s:.3f}"
                                 if since_first_line_s is not None
@@ -747,8 +809,9 @@ class CursorCLIAdapter:
                             fl = boot_timings.get("first_stdout_line_perf")
                             since_first_line_s = (now - fl) if fl is not None else None
                             logger.info(
-                                "cli stream_chat first assistant stream text since_popen_s=%.3f "
+                                "[%s] stream_chat first assistant stream text since_popen_s=%.3f "
                                 "since_first_ndjson_line_s=%s chars=%d",
+                                AGENT_CURSOR,
                                 now - t_after_popen,
                                 f"{since_first_line_s:.3f}"
                                 if since_first_line_s is not None
@@ -779,7 +842,8 @@ class CursorCLIAdapter:
                     result_session_id = payload.get("session_id")
                     result_request_id = payload.get("request_id")
                     logger.info(
-                        "stream-json result event (run finished) session_id=%s request_id=%s",
+                        "[%s] stream-json result event (run finished) session_id=%s request_id=%s",
+                        AGENT_CURSOR,
                         result_session_id,
                         result_request_id,
                     )
@@ -828,6 +892,10 @@ class CursorCLIAdapter:
                     result_request_id,
                     raise_on_error=True,
                 )
+        except asyncio.CancelledError:
+            if session is not None:
+                await session.terminate_agent(reason=f"{AGENT_CURSOR}_stream_chat_cancelled")
+            raise
         finally:
             if not cleanup_scheduled and not stderr_task.done():
                 stderr_task.cancel()

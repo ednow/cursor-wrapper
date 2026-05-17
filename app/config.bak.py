@@ -6,7 +6,12 @@ from functools import lru_cache
 from pathlib import Path
 
 CONFIG_CURSOR_BIN = r""
+# Claude Code CLI 可执行文件，默认 claude
+CONFIG_CLAUDE_BIN = ""
 CONFIG_CURSOR_WORKSPACE = ""
+# Agent 调度顺序，逗号分隔；仅在某 agent 启动 CLI producer 失败（首个 delta 前）时降级到下一个
+# 示例: claude,cursor
+CONFIG_AGENT_SCHEDULE = ""
 # 暴露给外部调用是用来验证的 API Key
 CONFIG_WRAPPER_API_KEY = ""
 # Cursor API Key
@@ -14,7 +19,9 @@ CONFIG_CURSOR_API_KEY = ""
 CONFIG_DEFAULT_MODEL = ""
 CONFIG_MODEL_ALIASES = ""
 CONFIG_CURSOR_TRUST = ""
-CONFIG_CURSOR_APPROVE_MCPS = ""
+# 是否自动为 Cursor CLI 加 --approve-mcps；默认开启
+# True / False；留空字符串 "" 时改读环境变量 CURSOR_APPROVE_MCPS
+CONFIG_CURSOR_APPROVE_MCPS: str | bool = ""
 CONFIG_CURSOR_FORCE = ""
 CONFIG_CURSOR_SANDBOX = ""
 # 是否对工具调用 hint 启用精简模式（过滤嵌套参数 / 截断长值），默认开启
@@ -30,6 +37,12 @@ CONFIG_LOG_RESPONSE_PREVIEW_MAX_LEN = ""
 # 流式 NDJSON 读完后是否在生成器内同步等待子进程收尾（True=旧行为，含非零退出时抛错）；默认 False 为异步收尾
 # True or False
 CONFIG_CURSOR_STREAM_SYNC_CLI_REAP = ""
+# 连续多少秒未向客户端推送 SSE（正文或 keepalive 注释）则 terminate agent；默认 120，<=0 关闭
+CONFIG_CURSOR_STREAM_IDLE_SECONDS = ""
+# 兼容旧配置名，语义同 IDLE_SECONDS
+CONFIG_CURSOR_STREAM_MAX_SECONDS = ""
+# 从上游请求头解析到的超时再减去该秒数，与空闲上限取 min
+CONFIG_CURSOR_STREAM_UPSTREAM_TIMEOUT_MARGIN = "10"
 # 为 True 时，传给 CLI 的 -p 改为「我的问题：最后一条用户消息 + 按需读取 prompt 文件」的桥接文案；完整多轮上下文写入工作区 prompt 目录下的文件
 # True / False；留空字符串 "" 时改读环境变量 CURSOR_CLI_LAST_USER_CONTEXT_BRIDGE
 CONFIG_CLI_LAST_USER_CONTEXT_BRIDGE = ""
@@ -38,7 +51,24 @@ CONFIG_CLI_LAST_USER_CONTEXT_BRIDGE = ""
 CONFIG_WRAPPER_RESPONSE_GREETING = False
 
 # 开启 WRAPPER_RESPONSE_GREETING 时使用的问候文案（固定）
-WRAPPER_RESPONSE_GREETING_TEXT = "收到，正在为你处理\n\n"
+WRAPPER_RESPONSE_GREETING_TEXT = "收到，正在为您处理\n\n"
+
+# 是否在收到 Cursor 首个正文 delta 前先推送一句介入确认（流式为独立 chunk，非流式为前缀）；默认开启
+# True / False；留空字符串 "" 时改读环境变量 WRAPPER_RESPONSE_ACK
+CONFIG_WRAPPER_RESPONSE_ACK = True
+
+# 各 agent 介入确认文案（流式独立 chunk / 非流式前缀）
+WRAPPER_RESPONSE_ACK_TEXT_CURSOR = "Cursor Agent 已介入，正在为您解决问题\n\n"
+WRAPPER_RESPONSE_ACK_TEXT_CLAUDE = "Claude Agent 已介入，正在为您解决问题\n\n"
+# 兼容旧引用
+WRAPPER_RESPONSE_ACK_TEXT = WRAPPER_RESPONSE_ACK_TEXT_CURSOR
+
+# 流式：是否在等待 Cursor 首个正文 delta 超过 WRAPPER_RESPONSE_ACK_IDLE 秒时仍强制推送 ack（需同时开启 WRAPPER_RESPONSE_ACK）
+# True / False；留空字符串 "" 时改读环境变量 WRAPPER_RESPONSE_ACK_IDLE_FORCE
+CONFIG_WRAPPER_RESPONSE_ACK_IDLE_FORCE = ""
+
+# 流式强制 ack 的空闲阈值（秒）；支持 int 或字符串；<=0 表示关闭；留空 "" 时改读环境变量，默认 30
+CONFIG_WRAPPER_RESPONSE_ACK_IDLE: str | int = ""
 
 DEFAULT_MODEL_ALIASES = {
     "cursor-agent": "auto",
@@ -90,6 +120,32 @@ def _parse_bool(value: str | None, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _pick_bool_config_or_env(
+    config_value: str | bool, env_name: str, *, default: bool = False
+) -> bool:
+    if isinstance(config_value, bool):
+        return config_value
+    if config_value.strip():
+        return _parse_bool(config_value.strip(), default=default)
+    env_value = os.getenv(env_name)
+    if env_value is not None:
+        return _parse_bool(env_value, default=default)
+    return default
+
+
+def _pick_int_config_or_env(
+    config_value: str | int, env_name: str, *, default: int
+) -> int:
+    if isinstance(config_value, int):
+        return config_value
+    if config_value.strip():
+        return _parse_stream_max_seconds(config_value.strip(), default=default)
+    env_value = os.getenv(env_name)
+    if env_value is not None:
+        return _parse_stream_max_seconds(env_value, default=default)
+    return default
+
+
 def _parse_model_aliases(raw_value: str | None) -> dict[str, str]:
     aliases: dict[str, str] = {}
     if not raw_value:
@@ -125,9 +181,46 @@ def _parse_optional_preview_len(raw: str | None) -> int | None:
     return None if n <= 0 else n
 
 
+def _pick_stream_idle_seconds_raw() -> str | None:
+    idle = _pick_config_or_env(
+        CONFIG_CURSOR_STREAM_IDLE_SECONDS, "CURSOR_STREAM_IDLE_SECONDS"
+    )
+    if idle is not None and str(idle).strip():
+        return idle
+    return _pick_config_or_env(
+        CONFIG_CURSOR_STREAM_MAX_SECONDS, "CURSOR_STREAM_MAX_SECONDS"
+    )
+
+
+def _parse_agent_schedule(raw: str | None, *, default: tuple[str, ...] = ("claude", "cursor")) -> tuple[str, ...]:
+    if raw is None or not str(raw).strip():
+        return default
+    parts = [p.strip().lower() for p in str(raw).split(",") if p.strip()]
+    if not parts:
+        return default
+    allowed = {"claude", "cursor"}
+    invalid = [p for p in parts if p not in allowed]
+    if invalid:
+        raise ValueError(f"Invalid agent(s) in schedule: {invalid!r}; allowed: {sorted(allowed)}")
+    return tuple(parts)
+
+
+def _parse_stream_max_seconds(raw: str | None, *, default: int = 120) -> int:
+    """<=0 表示关闭流式空闲超时；未配置或无效时用 default。"""
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        n = int(str(raw).strip(), 10)
+    except ValueError:
+        return default
+    return n
+
+
 @dataclass(frozen=True)
 class Settings:
     cursor_bin: str
+    claude_bin: str
+    agent_schedule: tuple[str, ...]
     cursor_workspace: str
     wrapper_api_key: str | None
     default_model: str
@@ -142,8 +235,20 @@ class Settings:
     log_level: str = "info"
     log_response_preview_max_len: int | None = None
     stream_sync_cli_reap: bool = False
+    stream_idle_seconds: int = 120
+    stream_upstream_timeout_margin: int = 10
     cli_last_user_context_bridge: bool = False
     response_greeting: bool = True
+    response_ack: bool = True
+    response_ack_idle_force: bool = False
+    response_ack_idle: int = 30
+    ack_text_cursor: str = WRAPPER_RESPONSE_ACK_TEXT_CURSOR
+    ack_text_claude: str = WRAPPER_RESPONSE_ACK_TEXT_CLAUDE
+
+    def ack_text_for(self, agent: str) -> str:
+        if agent.strip().lower() == "claude":
+            return self.ack_text_claude
+        return self.ack_text_cursor
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -154,6 +259,10 @@ class Settings:
         model_aliases = {**DEFAULT_MODEL_ALIASES, **env_aliases}
         return cls(
             cursor_bin=_pick_config_or_env(CONFIG_CURSOR_BIN, "CURSOR_BIN", "agent") or "agent",
+            claude_bin=_pick_config_or_env(CONFIG_CLAUDE_BIN, "CLAUDE_BIN", "claude") or "claude",
+            agent_schedule=_parse_agent_schedule(
+                _pick_config_or_env(CONFIG_AGENT_SCHEDULE, "AGENT_SCHEDULE")
+            ),
             cursor_workspace=str(workspace),
             wrapper_api_key=_pick_config_or_env(CONFIG_WRAPPER_API_KEY, "WRAPPER_API_KEY"),
             cursor_api_key=_pick_config_or_env(CONFIG_CURSOR_API_KEY, "CURSOR_API_KEY"),
@@ -164,8 +273,8 @@ class Settings:
                 _pick_config_or_env(CONFIG_CURSOR_TRUST, "CURSOR_TRUST"),
                 default=True,
             ),
-            approve_mcps=_parse_bool(
-                _pick_config_or_env(CONFIG_CURSOR_APPROVE_MCPS, "CURSOR_APPROVE_MCPS"),
+            approve_mcps=_pick_bool_config_or_env(
+                CONFIG_CURSOR_APPROVE_MCPS, "CURSOR_APPROVE_MCPS", default=True
             ),
             force=_parse_bool(
                 _pick_config_or_env(CONFIG_CURSOR_FORCE, "CURSOR_FORCE"),
@@ -194,6 +303,14 @@ class Settings:
                 ),
                 default=False,
             ),
+            stream_idle_seconds=_parse_stream_max_seconds(_pick_stream_idle_seconds_raw()),
+            stream_upstream_timeout_margin=_parse_stream_max_seconds(
+                _pick_config_or_env(
+                    CONFIG_CURSOR_STREAM_UPSTREAM_TIMEOUT_MARGIN,
+                    "CURSOR_STREAM_UPSTREAM_TIMEOUT_MARGIN",
+                ),
+                default=10,
+            ),
             cli_last_user_context_bridge=_parse_bool(
                 _pick_config_or_env(
                     CONFIG_CLI_LAST_USER_CONTEXT_BRIDGE,
@@ -208,6 +325,25 @@ class Settings:
                 ),
                 default=True,
             ),
+            response_ack=_parse_bool(
+                _pick_config_or_env(
+                    CONFIG_WRAPPER_RESPONSE_ACK,
+                    "WRAPPER_RESPONSE_ACK",
+                ),
+                default=True,
+            ),
+            response_ack_idle_force=_pick_bool_config_or_env(
+                CONFIG_WRAPPER_RESPONSE_ACK_IDLE_FORCE,
+                "WRAPPER_RESPONSE_ACK_IDLE_FORCE",
+                default=False,
+            ),
+            response_ack_idle=_pick_int_config_or_env(
+                CONFIG_WRAPPER_RESPONSE_ACK_IDLE,
+                "WRAPPER_RESPONSE_ACK_IDLE",
+                default=30,
+            ),
+            ack_text_cursor=WRAPPER_RESPONSE_ACK_TEXT_CURSOR,
+            ack_text_claude=WRAPPER_RESPONSE_ACK_TEXT_CLAUDE,
         )
 
     def resolve_model(self, requested_model: str | None) -> str:

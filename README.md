@@ -63,7 +63,7 @@ cp app/config.bak.py app/config.py
 内置默认别名：`cursor-agent -> auto`
 
 - `CURSOR_TRUST`：是否自动加 `--trust`，默认开启
-- `CURSOR_APPROVE_MCPS`：是否自动加 `--approve-mcps`
+- `CURSOR_APPROVE_MCPS`：是否自动加 `--approve-mcps`，默认开启
 - `CURSOR_FORCE`：是否自动加 `--force`
 - `CURSOR_SANDBOX`：可选，传给 `--sandbox`
 
