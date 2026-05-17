@@ -18,8 +18,6 @@ from .stream_chat_session import StreamChatSession
 
 logger = logging.getLogger("cursor-wrapper")
 
-logger = logging.getLogger("cursor-wrapper")
-
 MODEL_LINE_RE = re.compile(r"^(?P<id>\S+)\s+-\s+(?P<label>.+?)(?P<flags>(?:\s+\(.+?\))*)$")
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
@@ -54,68 +52,6 @@ async def _finish_cursor_cli_stream_subprocess(
         agent_label=agent_cli_label(AGENT_CURSOR),
         raise_on_error=raise_on_error,
     )
-
-
-async def _reap_after_stream_json_result_event(
-    process: asyncio.subprocess.Process, ended_on_result: bool
-) -> None:
-    """若已收到 ``result`` 行但子进程仍存活，则等待其退出（必要时 terminate/kill）。"""
-    if not ended_on_result or process.returncode is not None:
-        return
-    try:
-        await asyncio.wait_for(process.wait(), timeout=5.0)
-    except asyncio.TimeoutError:
-        logger.warning(
-            "cursor CLI still running after stream-json result event (pid=%s); terminating",
-            process.pid,
-        )
-        process.terminate()
-        try:
-            await asyncio.wait_for(process.wait(), timeout=10.0)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
-
-
-async def _finish_cursor_cli_stream_subprocess(
-    process: asyncio.subprocess.Process,
-    stderr_task: asyncio.Task,
-    ended_on_result: bool,
-    session_id: str | None,
-    request_id: str | None,
-    *,
-    raise_on_error: bool,
-) -> None:
-    """``stream_chat`` 在 NDJSON 读完后调用：reap、读 stderr、``wait()`` 取退出码。"""
-    try:
-        await _reap_after_stream_json_result_event(process, ended_on_result)
-        stderr_bytes = await stderr_task
-        stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
-        return_code = await process.wait()
-        if return_code != 0:
-            if raise_on_error:
-                raise CursorCLIError(
-                    stderr_text or "Cursor CLI streaming failed.",
-                    exit_code=return_code,
-                    stderr=stderr_text,
-                )
-            logger.error(
-                "cursor CLI exited with status %s after stream (session_id=%s request_id=%s): %s",
-                return_code,
-                session_id,
-                request_id,
-                stderr_text or "(empty stderr)",
-            )
-    except asyncio.CancelledError:
-        raise
-    except CursorCLIError:
-        raise
-    except Exception:
-        logger.exception(
-            "cursor CLI stream subprocess cleanup failed session_id=%s request_id=%s",
-            session_id,
-            request_id,
-        )
 
 
 class CursorCLIAdapter:
